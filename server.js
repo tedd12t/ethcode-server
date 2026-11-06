@@ -3,11 +3,14 @@
 // and returns the answer. The key never goes inside the app.
 //
 // Settings come from environment variables (set them in your host's dashboard):
-//   ANTHROPIC_API_KEY   required: your secret AI key
-//   MODEL               optional: default claude-haiku-5-5
+//   AI_PROVIDER         "gemini" (free tier, default) or "anthropic" (paid)
+//   GEMINI_API_KEY      needed when AI_PROVIDER is gemini (free key from aistudio.google.com)
+//   GEMINI_MODEL        optional: default gemini-flash-lite-latest
+//   ANTHROPIC_API_KEY   needed only when AI_PROVIDER is anthropic
+//   MODEL               optional (anthropic only): default claude-haiku-5-5
 //   PER_USER_DAILY      optional: questions per app install per day (default 30)
 //   IP_PER_MINUTE       optional: questions per IP per minute (default 30)
-//   GLOBAL_DAILY        optional: total questions per day for everyone (default 3000)
+//   GLOBAL_DAILY        optional: total questions per day for everyone (default 1000)
 //                       <- this is your budget safety switch
 
 const express = require("express");
@@ -17,14 +20,21 @@ app.set("trust proxy", 1); // behind a host's proxy, so req.ip is the real user,
 app.use(express.json({ limit: "10kb" }));
 
 const PORT = process.env.PORT || 3000;
+const PROVIDER = (process.env.AI_PROVIDER || "gemini").toLowerCase();
+const GEMINI_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-flash-lite-latest";
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 const MODEL = process.env.MODEL || "claude-haiku-5-5";
 const PER_USER_DAILY = Number(process.env.PER_USER_DAILY || 30);
 const IP_PER_MINUTE = Number(process.env.IP_PER_MINUTE || 30);
-const GLOBAL_DAILY = Number(process.env.GLOBAL_DAILY || 3000);
+const GLOBAL_DAILY = Number(process.env.GLOBAL_DAILY || 1000);
 const MAX_MESSAGE_CHARS = 2000;
 
-if (!API_KEY) {
+if (PROVIDER === "gemini" && !GEMINI_KEY) {
+  console.error("Missing GEMINI_API_KEY. Set it before starting the server.");
+  process.exit(1);
+}
+if (PROVIDER === "anthropic" && !API_KEY) {
   console.error("Missing ANTHROPIC_API_KEY. Set it before starting the server.");
   process.exit(1);
 }
@@ -58,6 +68,59 @@ setInterval(() => {
   for (const [k, v] of ipHits) if (!v.some((t) => now - t < MINUTE_MS)) ipHits.delete(k);
 }, 60 * MINUTE_MS).unref();
 
+// ---------- Ask the AI. Returns { ok, reply, busy } ----------
+async function askAI(message) {
+  if (PROVIDER === "gemini") {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+      {
+        method: "POST",
+        signal: AbortSignal.timeout(30000),
+        headers: { "content-type": "application/json", "x-goog-api-key": GEMINI_KEY },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          contents: [{ role: "user", parts: [{ text: message }] }],
+          generationConfig: { maxOutputTokens: 1024 },
+        }),
+      }
+    );
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("Gemini error:", response.status, JSON.stringify(data));
+      return { ok: false, busy: response.status === 429 };
+    }
+    const parts = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
+    return { ok: true, reply: parts.map((p) => p.text || "").join("\n") };
+  }
+
+  // Anthropic (paid)
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    signal: AbortSignal.timeout(30000),
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: 800,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: "user", content: message }],
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    console.error("Anthropic error:", response.status, JSON.stringify(data));
+    return { ok: false, busy: response.status === 429 };
+  }
+  const reply = (data.content || [])
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+  return { ok: true, reply };
+}
+
 // Health check: hosts ping this to know the server is alive
 app.get("/", (req, res) => res.send("ETHCode AI server is running"));
 
@@ -89,33 +152,14 @@ app.post("/chat", async (req, res) => {
   globalCount++;
 
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      signal: AbortSignal.timeout(30000), // give up after 30 seconds
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        max_tokens: 800,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: message }],
-      }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      console.error("AI error:", response.status, JSON.stringify(data));
-      return res.status(502).json({ reply: "The AI is unavailable right now. Try again soon." });
+    const result = await askAI(message);
+    if (!result.ok) {
+      const text = result.busy
+        ? "The AI is busy right now. Please try again in a minute."
+        : "The AI is unavailable right now. Try again soon.";
+      return res.status(result.busy ? 429 : 502).json({ reply: text });
     }
-
-    const reply = (data.content || [])
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("\n");
-    res.json({ reply: reply || "(no answer)" });
+    res.json({ reply: result.reply || "(no answer)" });
   } catch (err) {
     console.error("Server error:", err);
     res.status(500).json({ reply: "Something went wrong on the server." });
