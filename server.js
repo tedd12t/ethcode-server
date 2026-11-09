@@ -1,22 +1,7 @@
-// ETHCode AI server (public-ready version).
-// The app sends a question here; this server adds the secret AI key, asks the AI,
-// and returns the answer. The key never goes inside the app.
-//
-// Settings come from environment variables (set them in your host's dashboard):
-//   AI_PROVIDER         "gemini" (free tier, default) or "anthropic" (paid)
-//   GEMINI_API_KEY      needed when AI_PROVIDER is gemini (free key from aistudio.google.com)
-//   GEMINI_MODEL        optional: default gemini-flash-lite-latest
-//   ANTHROPIC_API_KEY   needed only when AI_PROVIDER is anthropic
-//   MODEL               optional (anthropic only): default claude-haiku-5-5
-//   PER_USER_DAILY      optional: questions per app install per day (default 30)
-//   IP_PER_MINUTE       optional: questions per IP per minute (default 30)
-//   GLOBAL_DAILY        optional: total questions per day for everyone (default 1000)
-//                       <- this is your budget safety switch
-
 const express = require("express");
 
 const app = express();
-app.set("trust proxy", 1); // behind a host's proxy, so req.ip is the real user, not the proxy
+app.set("trust proxy", 1); // behind a host's proxy
 app.use(express.json({ limit: "10kb" }));
 
 const PORT = process.env.PORT || 3000;
@@ -45,15 +30,14 @@ const SYSTEM_PROMPT =
   "1. If the user writes in English, you MUST reply 100% in English. Never use Amharic (ሀ, ለ, ሐ...) when the user writes in English. " +
   "2. ONLY reply in Amharic if the user writes to you in Amharic script (ሀ, ለ, ሐ...) or specifically asks to speak in Amharic. " +
   "CONTENT RULES: " +
-  "3. NEVER introduce yourself (never say 'Hello! I am ETHCode AI' or 'I am your coding tutor'). " +
+  "3. introduce yourself ( 'Hello! I am ETHCode AI' or 'I am your coding tutor'), when they type hi or hellow. " +
   "4. Jump directly into the explanation and code immediately. " +
   "5. Keep explanations short, simple, and mobile-friendly.";
 
-// ---------- Limits (kept in memory; they reset if the server restarts) ----------
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 const userHits = new Map(); // install id -> timestamps in the last 24h
-const ipHits = new Map();   // ip -> timestamps in the last minute
+const ipHits = new Map();   
 let globalCount = 0;
 let globalResetAt = Date.now() + DAY_MS;
 
@@ -65,14 +49,12 @@ function record(map, key, windowMs) {
   return recent.length;
 }
 
-// Clean old entries once an hour so memory doesn't grow forever
 setInterval(() => {
   const now = Date.now();
   for (const [k, v] of userHits) if (!v.some((t) => now - t < DAY_MS)) userHits.delete(k);
   for (const [k, v] of ipHits) if (!v.some((t) => now - t < MINUTE_MS)) ipHits.delete(k);
 }, 60 * MINUTE_MS).unref();
 
-// ---------- Ask the AI. Returns { ok, reply, busy } ----------
 async function askAI(message) {
   if (PROVIDER === "gemini") {
     const response = await fetch(
@@ -125,11 +107,8 @@ async function askAI(message) {
   return { ok: true, reply };
 }
 
-// Health check: hosts ping this to know the server is alive
 app.get("/", (req, res) => res.send("ETHCode AI server is running"));
 
-// The app calls this. Body: { "message": "..." }   Reply: { "reply": "..." }
-// Optional header from the app: X-Install-Id (a random id made once per install)
 app.post("/chat", async (req, res) => {
   const message = ((req.body && req.body.message) || "").toString().trim();
   if (!message) return res.status(400).json({ reply: "Please type a question." });
@@ -144,11 +123,9 @@ app.post("/chat", async (req, res) => {
   if (globalCount >= GLOBAL_DAILY)
     return res.status(503).json({ reply: "The AI is very busy today. Please try again tomorrow." });
 
-  // Per-minute limit by IP. Kept generous because many phone users can share one IP.
   if (record(ipHits, req.ip, MINUTE_MS) > IP_PER_MINUTE)
     return res.status(429).json({ reply: "Too many questions. Please wait a minute." });
 
-  // Daily limit per app install (falls back to the IP if the app sends no id)
   const installId = (req.get("X-Install-Id") || "").slice(0, 64) || `ip:${req.ip}`;
   if (record(userHits, installId, DAY_MS) > PER_USER_DAILY)
     return res.status(429).json({ reply: "You've reached today's question limit. Come back tomorrow!" });
