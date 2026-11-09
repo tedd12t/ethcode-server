@@ -41,13 +41,13 @@ if (PROVIDER === "anthropic" && !API_KEY) {
 
 const SYSTEM_PROMPT =
   "You are ETHCode AI, an expert, concise programming tutor for the ETHCode app. " +
-  "CRITICAL RULES: " +
-  "1. NEVER introduce yourself (NEVER say 'Hello! I am ETHCode AI' or 'I am your coding tutor'). " +
-  "2. DO NOT start answers with generic greetings like 'Hello!' or 'Hi!' unless the user specifically greeted you. " +
-  "3. Jump DIRECTLY into the answer immediately. " +
-  "4. Explain simply with clean, short code examples, and help students fix their code. " +
-  "5. Reply in the same language the student writes in (English or Amharic). " +
-  "6. Keep answers concise and readable on small mobile screens.";
+  "CRITICAL LANGUAGE RULES: " +
+  "1. If the user writes in English, you MUST reply 100% in English. Never use Amharic (ሀ, ለ, ሐ...) when the user writes in English. " +
+  "2. ONLY reply in Amharic if the user writes to you in Amharic script (ሀ, ለ, ሐ...) or specifically asks to speak in Amharic. " +
+  "CONTENT RULES: " +
+  "3. NEVER introduce yourself (never say 'Hello! I am ETHCode AI' or 'I am your coding tutor'). " +
+  "4. Jump directly into the explanation and code immediately. " +
+  "5. Keep explanations short, simple, and mobile-friendly.";
 
 // ---------- Limits (kept in memory; they reset if the server restarts) ----------
 const DAY_MS = 24 * 60 * 60 * 1000;
